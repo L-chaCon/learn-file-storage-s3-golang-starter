@@ -1,9 +1,14 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
+	"os"
+	"path/filepath"
 
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/database"
@@ -35,6 +40,12 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 	const maxMemory = 10 << 20
 	r.ParseMultipartForm(maxMemory)
 
+	videoData, err := cfg.db.GetVideo(videoID)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Not the owner of the video", err)
+		return
+	}
+
 	file, header, err := r.FormFile("thumbnail")
 	if err != nil {
 		respondWithError(w, http.StatusBadRequest, "Unable to parse form file", err)
@@ -42,28 +53,46 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 	}
 	defer file.Close()
 
-	mediaType := header.Header.Get("Content-Type")
-	data, err := io.ReadAll(file)
+	mediaType, _, err := mime.ParseMediaType(header.Header.Get("Content-Type"))
 	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Error reading file", err)
+		respondWithError(w, http.StatusBadRequest, "Invalid Content-Type", err)
+		return
+	}
+	extencion, err := getExtencion(mediaType)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "No suported file extencion", err)
 		return
 	}
 
-	videoData, err := cfg.db.GetVideo(videoID)
+	randName := make([]byte, 32)
+	rand.Read(randName)
+	base64.RawURLEncoding.EncodeToString(randName)
+	fileName := fmt.Sprintf(
+		"%s.%s",
+		base64.RawURLEncoding.EncodeToString(randName),
+		extencion,
+	)
+	filePath := filepath.Join(
+		cfg.assetsRoot,
+		fileName,
+	)
+
+	image, err := os.Create(filePath)
 	if err != nil {
-		respondWithError(w, http.StatusUnauthorized, "Not the owner of the video", err)
+		respondWithError(w, http.StatusInternalServerError, "Not able to create file", err)
 		return
 	}
-
-	videoThumbnails[videoData.ID] = thumbnail{
-		data:      data,
-		mediaType: mediaType,
+	defer image.Close()
+	_, err = io.Copy(image, file)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Not able to copy file", err)
+		return
 	}
 
 	thumbnailURL := fmt.Sprintf(
-		"http://localhost:%s/api/thumbnails/%s",
+		"http://localhost:%s/assets/%s",
 		cfg.port,
-		videoData.ID,
+		fileName,
 	)
 	videoData.ThumbnailURL = &thumbnailURL
 	err = cfg.db.UpdateVideo(videoData)
@@ -78,4 +107,17 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 	respondWithJSON(w, http.StatusOK, response{
 		Video: videoData,
 	})
+}
+
+func getExtencion(mediaType string) (string, error) {
+	var ext string
+	switch mediaType {
+	case "image/png":
+		ext = "png"
+	case "image/jpeg":
+		ext = "jpeg"
+	default:
+		return "", fmt.Errorf("%s not supported", ext)
+	}
+	return ext, nil
 }
