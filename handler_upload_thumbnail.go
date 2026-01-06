@@ -116,6 +116,8 @@ func getExtencion(mediaType string) (string, error) {
 		ext = "png"
 	case "image/jpeg":
 		ext = "jpeg"
+	case "video/mp4":
+		ext = "mp4"
 	default:
 		return "", fmt.Errorf("%s not supported", ext)
 	}
