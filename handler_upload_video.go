@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"mime"
 	"net/http"
 	"os"
+	"os/exec"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
@@ -81,11 +84,43 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	}
 	tmpFile.Seek(0, io.SeekStart)
 
+	// get ratio and deside bucket path
+	ratio, err := getVideoAspectRatio(tmpFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Not able to get ratio", err)
+		return
+	}
+	var bucketPrefix string
+	switch ratio {
+	case "16:9":
+		bucketPrefix = "landscape"
+	case "9:16":
+		bucketPrefix = "portrait"
+	default:
+		bucketPrefix = "other"
+	}
+
+	// process video
+	processPath, err := processVideoForFastStart(tmpFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Not able to prosses video", err)
+		return
+	}
+	processFile, err := os.Open(processPath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Not able to open prosses video", err)
+		return
+	}
+	defer processFile.Close()
+	defer os.Remove(processFile.Name())
+	processFile.Seek(0, io.SeekStart)
+
 	// Create file name
 	randName := make([]byte, 32)
 	rand.Read(randName)
 	fileName := fmt.Sprintf(
-		"%s.%s",
+		"%s/%s.%s",
+		bucketPrefix,
 		base64.RawURLEncoding.EncodeToString(randName),
 		extencion,
 	)
@@ -94,7 +129,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	_, err = cfg.s3Client.PutObject(r.Context(), &s3.PutObjectInput{
 		Bucket:      &cfg.s3Bucket,
 		Key:         &fileName,
-		Body:        tmpFile,
+		Body:        processFile,
 		ContentType: &mediaType,
 	})
 	if err != nil {
@@ -123,4 +158,37 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		Video: videoData,
 	})
 	fmt.Println("video uploaded: ", videoID, "by user", userID)
+}
+
+func getVideoAspectRatio(filePath string) (string, error) {
+	type FFProbeOut struct {
+		Stream []struct {
+			With               int    `json:"width"`
+			Height             int    `json:"height"`
+			DisplayAspectRatio string `json:"display_aspect_ratio"`
+		} `json:"streams"`
+	}
+	cmd := exec.Command("ffprobe", "-v", "error", "-print_format", "json", "-show_streams", filePath)
+
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		return "", err
+	}
+
+	var probeData FFProbeOut
+	if err := json.Unmarshal(out.Bytes(), &probeData); err != nil {
+		return "", err
+	}
+
+	return probeData.Stream[0].DisplayAspectRatio, nil
+}
+
+func processVideoForFastStart(filePath string) (string, error) {
+	outPath := fmt.Sprintf("%s.processing", filePath)
+	cmd := exec.Command("ffmpeg", "-i", filePath, "-c", "copy", "-movflags", "faststart", "-f", "mp4", outPath)
+	if err := cmd.Run(); err != nil {
+		return "", err
+	}
+	return outPath, nil
 }
