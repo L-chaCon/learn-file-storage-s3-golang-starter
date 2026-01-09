@@ -107,6 +107,7 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 	respondWithJSON(w, http.StatusOK, response{
 		Video: videoData,
 	})
+	fmt.Println("thumbnail for video uploaded: ", videoID, "by user", userID)
 }
 
 func getExtencion(mediaType string) (string, error) {
